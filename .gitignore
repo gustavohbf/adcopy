@@ -1,0 +1,5 @@
+/bin/
+/build
+/temp
+/target
+.settings/
