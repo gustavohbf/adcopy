@@ -50,6 +50,8 @@ public class Settings {
 
 	static final Option GROUP_PREFIX = new Option("g", "group_prefix", true, "Prefix used for selecting groups of interest in source AAD. Multiple optional prefixes may be informed separated by commas.");
 
+	static final Option USER_FIELD_NAME = new Option("u", "user_field_name", true, "Optional parameter. If informed, expect to find this field informed for 'User' objects and will use this information for matching users from both AAD (e.g.: 'userPrincipalName', 'onPremisesSamAccountName', etc.). If not informed, use the 'displayName' field for matching users.");
+
 	static final Option PREVIEW = new Option("p", "preview", false, "Optional parameter. If informed, will execute in 'preview mode' (i.e. it it won't change anything at the destination AAD, but will print at LOG whatever it would do)");
 	
 	static final Option THREADS = new Option("t", "threads", true, "Optional parameter. If informed, will execute this amount of threads for faster performance. If absent, will execute one single thread");

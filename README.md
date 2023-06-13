@@ -4,7 +4,7 @@ ADCopy is a small application that may be used for copying membership informatio
 
 This application connects to one AAD (the 'source'), queries for all groups starting with one of the provided prefixes, and compare each group's members with those ones informed in another AAD. It will then include or exclude members in the corresponding groups at the destination AAD.
 
-The objects from each AAD (groups and users) are compared by their names (displayName), not by their id's, which may be different.
+The objects from each AAD (groups and users) are compared by their names, usually taken from the 'displayName' field, but may be another field.
 
 The application requires the following API permissions (Application type) at the source AAD (admin consent required): 
 - Group.Read.All
@@ -44,4 +44,9 @@ mvn exec:java -Dexec.mainClass=gov.rfb.adcopy.AzureADCopy -Dexec.args="--src_ten
 For replicating the membership information for all groups defined in source AAD for which the group name starts with the prefix 'SYSTEM.', creating the missing groups at destination, with 10 concurrent threads, you may run something like this:
 ```
 mvn exec:java -Dexec.mainClass=gov.rfb.adcopy.AzureADCopy -Dexec.args="--src_tenant_id {...} --src_client_id {...} --src_client_secret {...} --dst_tenant_id {...} --dst_client_id {...} --dst_client_secret {...} --group_prefix SYSTEM. --threads 10 --create_missing_groups"
+```
+
+For replicating the membership information for all groups defined in source AAD for which the group name starts with the prefix 'SYSTEM.', skipping the missing groups at destination, with 10 concurrent threads, considering the 'onPremisesSamAccountName' field for comparing users, you may run something like this:
+```
+mvn exec:java -Dexec.mainClass=gov.rfb.adcopy.AzureADCopy -Dexec.args="--src_tenant_id {...} --src_client_id {...} --src_client_secret {...} --dst_tenant_id {...} --dst_client_id {...} --dst_client_secret {...} --group_prefix SYSTEM. --threads 10" --user_field_name onPremisesSamAccountName
 ```

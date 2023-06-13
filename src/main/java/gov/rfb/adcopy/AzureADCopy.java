@@ -21,6 +21,7 @@ package gov.rfb.adcopy;
 
 import static gov.rfb.adcopy.Settings.*;
 
+import java.lang.reflect.Field;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedList;
@@ -52,6 +53,7 @@ import com.azure.core.credential.TokenCredential;
 import com.azure.identity.ClientSecretCredentialBuilder;
 import com.microsoft.graph.authentication.TokenCredentialAuthProvider;
 import com.microsoft.graph.core.ClientException;
+import com.microsoft.graph.http.GraphServiceException;
 import com.microsoft.graph.logger.ILogger;
 import com.microsoft.graph.logger.LoggerLevel;
 import com.microsoft.graph.models.DirectoryObject;
@@ -73,7 +75,7 @@ import okhttp3.Request;
  * <BR>
  * This application connects to one AAD (the 'source'), queries for all groups starting with one of the provided prefixes, and compare each group's members
  * with those ones informed in another AAD. It will then include or exclude members in the corresponding groups at the destination AAD.<BR>
- * The objects from each AAD (groups and users) are compared by their names (displayName), not by their id's, which may be different.<BR>
+ * The objects from each AAD (groups and users) are compared by their names, usually taken from the 'displayName' field, but may be another field.<BR>
  * <BR>
  * The application requires the following API permissions (Application type) at the source AAD (admin consent required):<BR>
  * - Group.Read.All<BR>
@@ -98,7 +100,8 @@ public class AzureADCopy implements Runnable
 	/**
 	 * Default request options used in all requests related to MSGraph API
 	 */
-	private static final List<com.microsoft.graph.options.Option> DEFAULT_REQUEST_OPTIONS = Collections.singletonList(new HeaderOption("ConsistencyLevel", "eventual"));
+	private static final List<com.microsoft.graph.options.Option> DEFAULT_REQUEST_OPTIONS =
+			Collections.singletonList(new HeaderOption("ConsistencyLevel", "eventual"));
 	
 	/**
 	 * Expected prefix for environment variables that should be used for providing the corresponding command line options, in replacement to them.
@@ -106,6 +109,13 @@ public class AzureADCopy implements Runnable
 	private static final String PREFIX_ENV = "aadcopy_";
 	
 	private static final int DEFAULT_NUMBER_THREADS = 1;
+	
+	public static final String FIELD_ID = "id";
+	public static final String FIELD_DISPLAY_NAME = "displayName";
+	public static final String FIELD_USER_PRINCIPAL_NAME = "userPrincipalName";
+	public static final String FIELD_SAM_ACCOUNT_NAME = "onPremisesSamAccountName";
+	
+	private static final String DEFAULT_USER_FIELD_NAME = FIELD_DISPLAY_NAME;
 	
 	private static final int SC_NOT_FOUND = 404;
 
@@ -143,6 +153,11 @@ public class AzureADCopy implements Runnable
 	 * The prefix to be used for searching group names. Multiple prefixes may be informed separated by commas.
 	 */
 	private String groupPrefix;
+	
+	/**
+	 * Expect to find this field informed for 'User' objects and will use this information for matching users from both AAD (e.g.: 'userPrincipalName', 'onPremisesSamAccountName', etc.).
+	 */
+	private String userFieldName = DEFAULT_USER_FIELD_NAME;
 	
 	/**
 	 * Several counters incremented during the procedure
@@ -191,6 +206,11 @@ public class AzureADCopy implements Runnable
 	private int threads = DEFAULT_NUMBER_THREADS;
 	
 	/**
+	 * Method used for returning the attribute of user used for comparison between different AAD (e.g. the displayName).
+	 */
+	private Function<User, String> getUserField;
+	
+	/**
 	 * Entry point of the application
 	 */
     public static void main( String[] args ) throws Exception
@@ -215,6 +235,10 @@ public class AzureADCopy implements Runnable
     	procedure.setRemoveMembers(cmd.hasOption(REMOVE_MEMBERS.getOpt()));
     	procedure.setPreviewMode(cmd.hasOption(PREVIEW.getOpt()));
     	
+    	if (cmd.hasOption(USER_FIELD_NAME.getOpt())) {
+    		procedure.setUserFieldName(getParameter(USER_FIELD_NAME, cmd).get());
+    	}
+    	
     	if (cmd.hasOption(THREADS.getOpt())) {
     		procedure.setThreads(Integer.valueOf(getParameter(THREADS, cmd).get()));
     	}
@@ -228,6 +252,7 @@ public class AzureADCopy implements Runnable
     		log.log(Level.FINE, "Source tenant: "+procedure.getSourceTenantId());
     		log.log(Level.FINE, "Destination tenant: "+procedure.getDestinationTenantId());
     		log.log(Level.FINE, "Group prefix: "+procedure.getGroupPrefix());
+    		log.log(Level.FINE, "User field name: "+procedure.getUserFieldName());
     	}
     	
     	procedure.run();
@@ -310,7 +335,9 @@ public class AzureADCopy implements Runnable
 			}				
 			@Override
 			public void logError(String message, Throwable throwable) {
-				log.log(Level.SEVERE, message, throwable);
+				if (!(throwable instanceof GraphServiceException) 
+					|| ((GraphServiceException)throwable).getResponseCode()!=SC_NOT_FOUND)
+					log.log(Level.SEVERE, message, throwable);
 			}				
 			@Override
 			public void logDebug(String message) {
@@ -330,7 +357,7 @@ public class AzureADCopy implements Runnable
 	/**
 	 * Returns a group defined in AAD whose displayName is equal to the first parameter.
 	 */
-	public static Optional<Group> getGroupWithName(String name, GraphServiceClient<Request> graphClient) {
+	public Optional<Group> getGroupWithName(String name, GraphServiceClient<Request> graphClient) {
 		GroupCollectionPage page = graphClient.groups().buildRequest(DEFAULT_REQUEST_OPTIONS)
 			.select("displayName,id")
 			.filter(String.format("startswith(displayName, '%s')", name.replace("'", "''")))
@@ -349,18 +376,37 @@ public class AzureADCopy implements Runnable
 		}
 		return Optional.empty();
 	}
-
+	
 	/**
-	 * Returns an user defined in AAD whose displayName is equal to the first parameter.
+	 * Returns an user defined in AAD whose displayName (or some other field defined in 'userFieldName') is equal to the first parameter.
 	 */
-	public static Optional<User> getUserWithName(String name, GraphServiceClient<Request> graphClient) {
+	public Optional<User> getUserWithName(String name, GraphServiceClient<Request> graphClient) {
+		String fieldNames = (FIELD_DISPLAY_NAME.equalsIgnoreCase(userFieldName) || FIELD_ID.equalsIgnoreCase(userFieldName)) ? "displayName,id" : ("displayName,id,"+userFieldName);
+		if (FIELD_ID.equalsIgnoreCase(userFieldName)) {
+			try {
+				return Optional.ofNullable(graphClient.users(name).buildRequest(DEFAULT_REQUEST_OPTIONS)
+					.select(fieldNames)
+					.get());
+			}
+			catch (GraphServiceException ex) {
+				if (ex.getResponseCode()!=SC_NOT_FOUND) {
+					throw ex;
+				}
+				else {
+					return Optional.empty();
+				}
+			}
+		}
+		String filterExpression = (FIELD_DISPLAY_NAME.equalsIgnoreCase(userFieldName)) ? String.format("startswith(%s, '%s')", userFieldName, name.replace("'", "''"))
+				: String.format("%s eq '%s'", userFieldName, name.replace("'", "''"));
 		UserCollectionPage page = graphClient.users().buildRequest(DEFAULT_REQUEST_OPTIONS)
-			.select("displayName,id,userPrincipalName")
-			.filter(String.format("startswith(displayName, '%s')", name.replace("'", "''")))
+			.select(fieldNames)
+			.filter(filterExpression)
+			.count(true)
 			.get();
 		while (page!=null) {
 			List<User> currentPage = page.getCurrentPage();
-			Optional<User> user = currentPage.stream().filter(g->name.equalsIgnoreCase(g.displayName)).findFirst();
+			Optional<User> user = currentPage.stream().filter(u->filterUser(u,name)).findFirst();
 			if (user.isPresent())
 				return user;
 			UserCollectionRequestBuilder nextPage = page.getNextPage();
@@ -376,14 +422,15 @@ public class AzureADCopy implements Runnable
 	/**
 	 * Returns the full list of users that are members of the group whose id is informed.
 	 */
-	public static List<User> getUsersMembers(String groupId, GraphServiceClient<Request> graphClient) {
+	public List<User> getUsersMembers(String groupId, GraphServiceClient<Request> graphClient) {
 		if (groupId==null)
 			return Collections.emptyList();
+		String fieldNames = (FIELD_DISPLAY_NAME.equalsIgnoreCase(userFieldName) || FIELD_ID.equalsIgnoreCase(userFieldName)) ? "displayName,id" : ("displayName,id,"+userFieldName);
 		List<User> users = new LinkedList<>();
 		try {
 			DirectoryObjectCollectionWithReferencesPage  pageOfMembers =
 				graphClient.groups(groupId).members().buildRequest(DEFAULT_REQUEST_OPTIONS)
-				.select("displayName,id,userPrincipalName")
+				.select(fieldNames)
 				.get();
 			while (pageOfMembers!=null) {
 				List<DirectoryObject> members = pageOfMembers.getCurrentPage();
@@ -401,7 +448,7 @@ public class AzureADCopy implements Runnable
 				}
 			}
 		}
-		catch (com.microsoft.graph.http.GraphServiceException ex) {
+		catch (GraphServiceException ex) {
 			if (ex.getResponseCode()!=SC_NOT_FOUND) {
 				throw ex;
 			}
@@ -521,6 +568,20 @@ public class AzureADCopy implements Runnable
 	}
 	
 	/**
+	 * Expect to find this field informed for 'User' objects and will use this information for matching users from both AAD (e.g.: 'userPrincipalName', 'onPremisesSamAccountName', etc.).
+	 */
+	public String getUserFieldName() {
+		return userFieldName;
+	}
+
+	/**
+	 * Expect to find this field informed for 'User' objects and will use this information for matching users from both AAD (e.g.: 'userPrincipalName', 'onPremisesSamAccountName', etc.).
+	 */
+	public void setUserFieldName(String userFieldName) {
+		this.userFieldName = userFieldName;
+	}
+
+	/**
 	 * Indicates if it should create missing groups at the destination AAD
 	 */
 	public boolean isCreateMissingGroups() {
@@ -629,6 +690,7 @@ public class AzureADCopy implements Runnable
 	public void run() {
 		
 		clearCounters();
+		locateUserField();
 		timestampStart = System.currentTimeMillis();
 		
 		try {
@@ -741,13 +803,17 @@ public class AzureADCopy implements Runnable
 		List<User> usersMembersAtDestination = getUsersMembers(groupAtDestination.id, destinationGraphClient);
 		
 		// Check which users are to be created and which users are to be removed from the groups's membership
-		final Map<String, User> usersMembersAtSourceByName = Collections.unmodifiableMap(usersMembersAtSource.stream().collect(Collectors.toMap(
-				/*keyMapper*/u->u.displayName, 
-				/*valueMapper*/Function.identity(), 
-				/*mergeFunction*/(a,b)->a, 
-				/*mapSupplier*/()->new TreeMap<>(String.CASE_INSENSITIVE_ORDER))));
-		final Map<String, User> usersMembersAtDestinationByName = Collections.unmodifiableMap(usersMembersAtDestination.stream().collect(Collectors.toMap(
-			/*keyMapper*/u->u.displayName, 
+		final Map<String, User> usersMembersAtSourceByName = Collections.unmodifiableMap(usersMembersAtSource.stream()
+			.filter(u->getUserAttribute(u)!=null)
+			.collect(Collectors.toMap(
+			/*keyMapper*/this::getUserAttribute, 
+			/*valueMapper*/Function.identity(), 
+			/*mergeFunction*/(a,b)->a, 
+			/*mapSupplier*/()->new TreeMap<>(String.CASE_INSENSITIVE_ORDER))));
+		final Map<String, User> usersMembersAtDestinationByName = Collections.unmodifiableMap(usersMembersAtDestination.stream()
+			.filter(u->getUserAttribute(u)!=null)
+			.collect(Collectors.toMap(
+			/*keyMapper*/this::getUserAttribute, 
 			/*valueMapper*/Function.identity(), 
 			/*mergeFunction*/(a,b)->a, 
 			/*mapSupplier*/()->new TreeMap<>(String.CASE_INSENSITIVE_ORDER))));
@@ -755,14 +821,14 @@ public class AzureADCopy implements Runnable
 		if (createMembers) {
 			// Check which users are to be created
 			for (Map.Entry<String, User> entry: usersMembersAtSourceByName.entrySet()) {
-				String displayName = entry.getKey();
-				if (usersMembersAtDestinationByName.containsKey(displayName))
+				String nameToCompare = entry.getKey();
+				if (usersMembersAtDestinationByName.containsKey(nameToCompare))
 					continue;
-				if (missingUsersAtDestination.contains(displayName))
+				if (missingUsersAtDestination.contains(nameToCompare))
 					continue;
 				// New member to be included at destination
 				Runnable addNewMember = ()->{
-					Optional<User> userAtDestination = getUserWithName(displayName, destinationGraphClient);
+					Optional<User> userAtDestination = getUserWithName(nameToCompare, destinationGraphClient);
 					if (userAtDestination.isPresent()) {
 						try {
 							addMember(userAtDestination.get(), groupAtDestination, destinationGraphClient);
@@ -774,9 +840,9 @@ public class AzureADCopy implements Runnable
 						}
 					}
 					else {
-						missingUsersAtDestination.add(displayName);
+						missingUsersAtDestination.add(nameToCompare);
 						if (log.isLoggable(Level.WARNING))
-							log.log(Level.WARNING, String.format("Missing user at destination: %s", displayName));
+							log.log(Level.WARNING, String.format("Missing user at destination: %s", nameToCompare));
 					}
 				};
 				if (executor==null)
@@ -789,8 +855,8 @@ public class AzureADCopy implements Runnable
 		if (removeMembers) {
 			// Check which users are to be removed
 			for (Map.Entry<String, User> entry: usersMembersAtDestinationByName.entrySet()) {
-				String displayName = entry.getKey();
-				if (usersMembersAtSourceByName.containsKey(displayName))
+				String nameToCompare = entry.getKey();
+				if (usersMembersAtSourceByName.containsKey(nameToCompare))
 					continue;
 				// Existing member to be excluded at destination
 				Runnable removeMember = ()->{
@@ -928,6 +994,60 @@ public class AzureADCopy implements Runnable
 	 */
 	public long getTimeElapsedMS() {
 		return timestampEnd - timestampStart;
+	}
+	
+	/**
+	 * Initializes the internal 'getUserField' according to the 'userFieldName'
+	 */
+	protected void locateUserField() {
+		// Some commonly used options
+		if (FIELD_DISPLAY_NAME.equalsIgnoreCase(userFieldName))
+			getUserField = user -> user.displayName;
+		else if (FIELD_USER_PRINCIPAL_NAME.equalsIgnoreCase(userFieldName))
+			getUserField = user -> user.userPrincipalName;
+		else if (FIELD_SAM_ACCOUNT_NAME.equalsIgnoreCase(userFieldName))
+			getUserField = user -> user.onPremisesSamAccountName;
+		else if (FIELD_ID.equalsIgnoreCase(userFieldName))
+			getUserField = user -> user.id;
+		// For other options, use Java reflection
+		else {
+			try {
+				Field field = User.class.getField(userFieldName);
+				if (!String.class.equals(field.getType()))
+					throw new UnsupportedOperationException("Incompatible type of field '"+userFieldName+"' for object User!");
+				field.setAccessible(true);
+				getUserField = (user)->{
+					try {
+						return (String)field.get(user);
+					} catch (IllegalArgumentException | IllegalAccessException ex) {
+						return null;
+					}
+				};
+			} catch (NoSuchFieldException | SecurityException ex) {
+				throw new RuntimeException("Unknown or unaccessible field '"+userFieldName+"' for object User!");
+			}
+		}
+	}
+	
+	/**
+	 * Check if the User object matches the provided parameter. Usually it will compare the User's 'displayName', but may use
+	 * another field as defined in 'userFieldName'
+	 */
+	public boolean filterUser(User user, String parameter) {
+		if (parameter==null)
+			return false;
+		String value = getUserAttribute(user);
+		return parameter.equalsIgnoreCase(value);
+	}
+
+	/**
+	 * Return the User's attribute that will be used to compare with other Users defined in another AAD.
+	 */
+	public String getUserAttribute(User user) {
+		if (getUserField==null) {
+			locateUserField();
+		}
+		return getUserField.apply(user);		
 	}
 	
 	/**
