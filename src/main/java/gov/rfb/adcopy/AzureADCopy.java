@@ -114,6 +114,7 @@ public class AzureADCopy implements Runnable
 	public static final String FIELD_DISPLAY_NAME = "displayName";
 	public static final String FIELD_USER_PRINCIPAL_NAME = "userPrincipalName";
 	public static final String FIELD_SAM_ACCOUNT_NAME = "onPremisesSamAccountName";
+	public static final String FIELD_EMPLOYEE_ID = "employeeId";
 	
 	private static final String DEFAULT_USER_FIELD_NAME = FIELD_DISPLAY_NAME;
 	
@@ -155,9 +156,16 @@ public class AzureADCopy implements Runnable
 	private String groupPrefix;
 	
 	/**
-	 * Expect to find this field informed for 'User' objects and will use this information for matching users from both AAD (e.g.: 'userPrincipalName', 'onPremisesSamAccountName', etc.).
+	 * 'User' object attribute name for matching users in source AAD, e.g.,
+	 * 'userPrincipalName', 'onPremisesSamAccountName' or 'employeeId'
 	 */
-	private String userFieldName = DEFAULT_USER_FIELD_NAME;
+	private String sourceUserFieldName = DEFAULT_USER_FIELD_NAME;
+
+	/**
+	 * 'User' object attribute name for matching users in destination AAD, e.g.,
+	 * 'userPrincipalName', 'onPremisesSamAccountName' or 'employeeId'
+	 */
+	private String destinationUserFieldName = DEFAULT_USER_FIELD_NAME;
 	
 	/**
 	 * Several counters incremented during the procedure
@@ -184,6 +192,9 @@ public class AzureADCopy implements Runnable
 	 */
 	private boolean createMissingGroups;
 	
+	/** Indicates that empty groups are allowed when creating missing groups. */
+	private boolean allowEmptyGroups;
+	
 	/**
 	 * Indicates if it should remove members at the destination AAD according to the source AAD
 	 */
@@ -205,11 +216,12 @@ public class AzureADCopy implements Runnable
 	 */
 	private int threads = DEFAULT_NUMBER_THREADS;
 	
-	/**
-	 * Method used for returning the attribute of user used for comparison between different AAD (e.g. the displayName).
-	 */
-	private Function<User, String> getUserField;
-	
+	/** Function to map the attribute which identifies a user in source AAD. */
+	private Function<User, String> sourceUserFieldMapper;
+
+	/** Function to map the attribute which identifies a user in destination AAD. */
+	private Function<User, String> destinationUserFieldMapper;
+
 	/**
 	 * Entry point of the application
 	 */
@@ -232,13 +244,25 @@ public class AzureADCopy implements Runnable
     	procedure.setDestinationSecret(getRequiredParameter(DST_CLIENT_SECRET, cmd).toCharArray());
     	
     	procedure.setCreateMissingGroups(cmd.hasOption(CREATE_MISSING_GROUPS.getOpt()));
+    	procedure.setAllowEmptyGroups(cmd.hasOption(ALLOW_EMPTY_GROUPS.getOpt()));
+		if (procedure.isAllowEmptyGroups() && !procedure.isCreateMissingGroups())
+			throw new IllegalArgumentException("Parameter '" + ALLOW_EMPTY_GROUPS.getLongOpt() + "' requires '"
+					+ CREATE_MISSING_GROUPS.getLongOpt() + "'");
     	procedure.setRemoveMembers(cmd.hasOption(REMOVE_MEMBERS.getOpt()));
     	procedure.setPreviewMode(cmd.hasOption(PREVIEW.getOpt()));
     	
-    	if (cmd.hasOption(USER_FIELD_NAME.getOpt())) {
-    		procedure.setUserFieldName(getParameter(USER_FIELD_NAME, cmd).get());
-    	}
-    	
+		if (cmd.hasOption(USER_FIELD_NAME.getOpt())) {
+			String userFieldName = getParameter(USER_FIELD_NAME, cmd).get();
+			procedure.setSourceUserFieldName(userFieldName);
+			procedure.setDestinationUserFieldName(userFieldName);
+		}
+
+		if (cmd.hasOption(SRC_USER_FIELD_NAME.getOpt()))
+			procedure.setSourceUserFieldName(getParameter(SRC_USER_FIELD_NAME, cmd).get());
+
+		if (cmd.hasOption(DST_USER_FIELD_NAME.getOpt()))
+			procedure.setDestinationUserFieldName(getParameter(DST_USER_FIELD_NAME, cmd).get());
+
     	if (cmd.hasOption(THREADS.getOpt())) {
     		procedure.setThreads(Integer.valueOf(getParameter(THREADS, cmd).get()));
     	}
@@ -252,12 +276,14 @@ public class AzureADCopy implements Runnable
     		log.log(Level.FINE, "Source tenant: "+procedure.getSourceTenantId());
     		log.log(Level.FINE, "Destination tenant: "+procedure.getDestinationTenantId());
     		log.log(Level.FINE, "Group prefix: "+procedure.getGroupPrefix());
-    		log.log(Level.FINE, "User field name: "+procedure.getUserFieldName());
+			log.log(Level.FINE, "Source user field name: " + procedure.getSourceUserFieldName());
+			log.log(Level.FINE, "Destination user field name: " + procedure.getDestinationUserFieldName());
     	}
     	
     	procedure.run();
     	
     	log.log(Level.INFO, procedure.getSummary());
+    	log.log(Level.INFO, "FINISHED");
     }
     
     /**
@@ -380,7 +406,8 @@ public class AzureADCopy implements Runnable
 	/**
 	 * Returns an user defined in AAD whose displayName (or some other field defined in 'userFieldName') is equal to the first parameter.
 	 */
-	public Optional<User> getUserWithName(String name, GraphServiceClient<Request> graphClient) {
+	public Optional<User> getUserWithName(String name, GraphServiceClient<Request> graphClient, boolean inSourceAAD) {
+		String userFieldName = inSourceAAD ? sourceUserFieldName : destinationUserFieldName;
 		String fieldNames = (FIELD_DISPLAY_NAME.equalsIgnoreCase(userFieldName) || FIELD_ID.equalsIgnoreCase(userFieldName)) ? "displayName,id" : ("displayName,id,"+userFieldName);
 		if (FIELD_ID.equalsIgnoreCase(userFieldName)) {
 			try {
@@ -406,7 +433,7 @@ public class AzureADCopy implements Runnable
 			.get();
 		while (page!=null) {
 			List<User> currentPage = page.getCurrentPage();
-			Optional<User> user = currentPage.stream().filter(u->filterUser(u,name)).findFirst();
+			Optional<User> user = currentPage.stream().filter(u -> filterUser(u, name, inSourceAAD)).findFirst();
 			if (user.isPresent())
 				return user;
 			UserCollectionRequestBuilder nextPage = page.getNextPage();
@@ -422,7 +449,7 @@ public class AzureADCopy implements Runnable
 	/**
 	 * Returns the full list of users that are members of the group whose id is informed.
 	 */
-	public List<User> getUsersMembers(String groupId, GraphServiceClient<Request> graphClient) {
+	public List<User> getUsersMembers(String groupId, GraphServiceClient<Request> graphClient, String userFieldName) {
 		if (groupId==null)
 			return Collections.emptyList();
 		String fieldNames = (FIELD_DISPLAY_NAME.equalsIgnoreCase(userFieldName) || FIELD_ID.equalsIgnoreCase(userFieldName)) ? "displayName,id" : ("displayName,id,"+userFieldName);
@@ -568,17 +595,35 @@ public class AzureADCopy implements Runnable
 	}
 	
 	/**
-	 * Expect to find this field informed for 'User' objects and will use this information for matching users from both AAD (e.g.: 'userPrincipalName', 'onPremisesSamAccountName', etc.).
+	 * 'User' object attribute name for matching users in source AAD, e.g.,
+	 * 'userPrincipalName', 'onPremisesSamAccountName' or 'employeeId'
 	 */
-	public String getUserFieldName() {
-		return userFieldName;
+	public String getSourceUserFieldName() {
+		return sourceUserFieldName;
 	}
 
 	/**
-	 * Expect to find this field informed for 'User' objects and will use this information for matching users from both AAD (e.g.: 'userPrincipalName', 'onPremisesSamAccountName', etc.).
+	 * 'User' object attribute name for matching users in source AAD, e.g.,
+	 * 'userPrincipalName', 'onPremisesSamAccountName' or 'employeeId'
 	 */
-	public void setUserFieldName(String userFieldName) {
-		this.userFieldName = userFieldName;
+	public void setSourceUserFieldName(String sourceUserFieldName) {
+		this.sourceUserFieldName = sourceUserFieldName;
+	}
+
+	/**
+	 * 'User' object attribute name for matching users in destination AAD, e.g.,
+	 * 'userPrincipalName', 'onPremisesSamAccountName' or 'employeeId'
+	 */
+	public String getDestinationUserFieldName() {
+		return destinationUserFieldName;
+	}
+
+	/**
+	 * 'User' object attribute name for matching users in destination AAD, e.g.,
+	 * 'userPrincipalName', 'onPremisesSamAccountName' or 'employeeId'
+	 */
+	public void setDestinationUserFieldName(String destinationUserFieldName) {
+		this.destinationUserFieldName = destinationUserFieldName;
 	}
 
 	/**
@@ -593,6 +638,16 @@ public class AzureADCopy implements Runnable
 	 */
 	public void setCreateMissingGroups(boolean createMissingGroups) {
 		this.createMissingGroups = createMissingGroups;
+	}
+
+	/** Indicates that empty groups are allowed when creating missing groups. */
+	public boolean isAllowEmptyGroups() {
+		return allowEmptyGroups;
+	}
+
+	/** Indicates that empty groups are allowed when creating missing groups. */
+	public void setAllowEmptyGroups(boolean allowEmptyGroups) {
+		this.allowEmptyGroups = allowEmptyGroups;
 	}
 
 	/**
@@ -690,7 +745,8 @@ public class AzureADCopy implements Runnable
 	public void run() {
 		
 		clearCounters();
-		locateUserField();
+		sourceUserFieldMapper = locateUserField(sourceUserFieldName);
+		destinationUserFieldMapper = locateUserField(destinationUserFieldName);
 		timestampStart = System.currentTimeMillis();
 		
 		try {
@@ -768,14 +824,17 @@ public class AzureADCopy implements Runnable
 		countGroups.increment();
 		
 		// Get the current users members at source
-		List<User> usersMembersAtSource = getUsersMembers(group.id, sourceGraphClient);
+		List<User> usersMembersAtSource = getUsersMembers(group.id, sourceGraphClient, sourceUserFieldName);
 		countUsersMembers.add(usersMembersAtSource.size());
 		
 		// Seek at destination a group with the same group name
 		Group groupAtDestination = getGroupWithName(group.displayName, destinationGraphClient)
 			.orElseGet(()->{
-				if (usersMembersAtSource.isEmpty())
+				if (usersMembersAtSource.isEmpty() && !allowEmptyGroups) {
+					if (log.isLoggable(Level.WARNING))
+						log.log(Level.WARNING, String.format("Empty missing group ignored: %s", group.displayName));
 					return null; // If the group is missing at destination, but there are not members at source, just ignore it
+				}
 				countMissingGroupsAtDestination.increment();
 				if (createMissingGroups) {
 					try {
@@ -800,20 +859,35 @@ public class AzureADCopy implements Runnable
 		}
 		
 		// Get the current users members at destination
-		List<User> usersMembersAtDestination = getUsersMembers(groupAtDestination.id, destinationGraphClient);
+		List<User> usersMembersAtDestination = getUsersMembers(groupAtDestination.id, destinationGraphClient,
+				destinationUserFieldName);
 		
 		// Check which users are to be created and which users are to be removed from the groups's membership
 		final Map<String, User> usersMembersAtSourceByName = Collections.unmodifiableMap(usersMembersAtSource.stream()
-			.filter(u->getUserAttribute(u)!=null)
+			.filter(u -> {
+				if (getUserAttribute(u, /* inSourceAAD */true) != null)
+					return true;
+				if (log.isLoggable(Level.WARNING))
+					log.log(Level.WARNING, String.format("Source group member has undefined attribute value " //
+							+ "(user ignored in source): %s, group %s", u.displayName, group.displayName));
+				return false;
+			})
 			.collect(Collectors.toMap(
-			/*keyMapper*/this::getUserAttribute, 
+			/*keyMapper*/u -> getUserAttribute(u, /* inSourceAAD */true), 
 			/*valueMapper*/Function.identity(), 
 			/*mergeFunction*/(a,b)->a, 
 			/*mapSupplier*/()->new TreeMap<>(String.CASE_INSENSITIVE_ORDER))));
 		final Map<String, User> usersMembersAtDestinationByName = Collections.unmodifiableMap(usersMembersAtDestination.stream()
-			.filter(u->getUserAttribute(u)!=null)
+			.filter(u -> {
+				if (getUserAttribute(u, /* inSourceAAD */false) != null)
+					return true;
+				if (log.isLoggable(Level.WARNING))
+					log.log(Level.WARNING, String.format("Destination group member has undefined attribute value " //
+							+ "(user ignored in destination): %s, group %s", u.displayName, groupAtDestination.displayName));
+				return false;
+			})
 			.collect(Collectors.toMap(
-			/*keyMapper*/this::getUserAttribute, 
+			/*keyMapper*/u -> getUserAttribute(u, /* inSourceAAD */false), 
 			/*valueMapper*/Function.identity(), 
 			/*mergeFunction*/(a,b)->a, 
 			/*mapSupplier*/()->new TreeMap<>(String.CASE_INSENSITIVE_ORDER))));
@@ -828,7 +902,7 @@ public class AzureADCopy implements Runnable
 					continue;
 				// New member to be included at destination
 				Runnable addNewMember = ()->{
-					Optional<User> userAtDestination = getUserWithName(nameToCompare, destinationGraphClient);
+					Optional<User> userAtDestination = getUserWithName(nameToCompare, destinationGraphClient, false);
 					if (userAtDestination.isPresent()) {
 						try {
 							addMember(userAtDestination.get(), groupAtDestination, destinationGraphClient);
@@ -996,10 +1070,9 @@ public class AzureADCopy implements Runnable
 		return timestampEnd - timestampStart;
 	}
 	
-	/**
-	 * Initializes the internal 'getUserField' according to the 'userFieldName'
-	 */
-	protected void locateUserField() {
+	/** Returns a function that maps a user attribute. */
+	protected Function<User, String> locateUserField(String userFieldName) {
+		Function<User, String> getUserField;
 		// Some commonly used options
 		if (FIELD_DISPLAY_NAME.equalsIgnoreCase(userFieldName))
 			getUserField = user -> user.displayName;
@@ -1009,6 +1082,8 @@ public class AzureADCopy implements Runnable
 			getUserField = user -> user.onPremisesSamAccountName;
 		else if (FIELD_ID.equalsIgnoreCase(userFieldName))
 			getUserField = user -> user.id;
+		else if (FIELD_EMPLOYEE_ID.equalsIgnoreCase(userFieldName))
+			getUserField = user -> user.employeeId;
 		// For other options, use Java reflection
 		else {
 			try {
@@ -1027,29 +1102,36 @@ public class AzureADCopy implements Runnable
 				throw new RuntimeException("Unknown or unaccessible field '"+userFieldName+"' for object User!");
 			}
 		}
+		return getUserField;
 	}
 	
 	/**
 	 * Check if the User object matches the provided parameter. Usually it will compare the User's 'displayName', but may use
 	 * another field as defined in 'userFieldName'
 	 */
-	public boolean filterUser(User user, String parameter) {
+	public boolean filterUser(User user, String parameter, boolean inSourceAAD) {
 		if (parameter==null)
 			return false;
-		String value = getUserAttribute(user);
+		String value = getUserAttribute(user, inSourceAAD);
 		return parameter.equalsIgnoreCase(value);
 	}
 
 	/**
-	 * Return the User's attribute that will be used to compare with other Users defined in another AAD.
+	 * Returns the attribute value which identifies the user in source or
+	 * destination AAD.
 	 */
-	public String getUserAttribute(User user) {
-		if (getUserField==null) {
-			locateUserField();
+	public String getUserAttribute(User user, boolean inSourceAAD) {
+		if (inSourceAAD) {
+			if (sourceUserFieldMapper == null)
+				sourceUserFieldMapper = locateUserField(sourceUserFieldName);
+			return sourceUserFieldMapper.apply(user);
+		} else {
+			if (destinationUserFieldMapper == null)
+				destinationUserFieldMapper = locateUserField(destinationUserFieldName);
+			return destinationUserFieldMapper.apply(user);
 		}
-		return getUserField.apply(user);		
 	}
-	
+
 	/**
 	 * Returns a summary text with the results of the last execution of this procedure
 	 */

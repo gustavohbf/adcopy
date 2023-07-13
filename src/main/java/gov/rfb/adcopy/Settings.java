@@ -46,11 +46,27 @@ public class Settings {
 	
 	static final Option CREATE_MISSING_GROUPS = new Option("cmg", "create_missing_groups", false, "Optional parameter. If informed, will automatically create at destination any missing groups. If not informed, will only report their absence.");
 
+	static final Option ALLOW_EMPTY_GROUPS = new Option("aeg", "allow_empty_groups", false,
+			"Optional parameter (requires 'create_missing_groups'). Allows creating empty missing groups. "
+					+ "By default, a missing group will not be created when empty in source tenant.");
+
 	static final Option REMOVE_MEMBERS = new Option("rm", "remove_members", false, "Optional parameter. If informed, will remove members at destination that are no longer members in the same group at source. If not informed, will not remove them.");
 
 	static final Option GROUP_PREFIX = new Option("g", "group_prefix", true, "Prefix used for selecting groups of interest in source AAD. Multiple optional prefixes may be informed separated by commas.");
 
 	static final Option USER_FIELD_NAME = new Option("u", "user_field_name", true, "Optional parameter. If informed, expect to find this field informed for 'User' objects and will use this information for matching users from both AAD (e.g.: 'userPrincipalName', 'onPremisesSamAccountName', etc.). If not informed, use the 'displayName' field for matching users.");
+
+	static final Option SRC_USER_FIELD_NAME = new Option("su", "src_user_field_name", true,
+			"Optional parameter. 'User' object attribute name for matching users in source AAD. "
+					+ "Can be used in conjunction with parameter 'dst_user_field_name' to accommodate a scenario of "
+					+ "cross-tenant synchronization where a source user attribute has been mapped to a different name. "
+					+ "Takes precedence over parameter 'user_field_name'");
+
+	static final Option DST_USER_FIELD_NAME = new Option("du", "dst_user_field_name", true,
+			"Optional parameter. 'User' object attribute name for matching users in destination AAD. "
+					+ "Can be used in conjunction with parameter 'src_user_field_name' to accommodate a scenario of "
+					+ "cross-tenant synchronization where a source user attribute has been mapped to a different name. "
+					+ "Takes precedence over parameter 'user_field_name'");
 
 	static final Option PREVIEW = new Option("p", "preview", false, "Optional parameter. If informed, will execute in 'preview mode' (i.e. it it won't change anything at the destination AAD, but will print at LOG whatever it would do)");
 	
