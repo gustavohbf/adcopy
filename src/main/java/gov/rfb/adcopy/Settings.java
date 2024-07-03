@@ -38,12 +38,20 @@ public class Settings {
 
 	static final Option SRC_CLIENT_SECRET = new Option("ss", "src_client_secret", true, "Client-secret of application with read access to source AAD");
 
+	static final Option SRC_CLIENT_CERTIFICATE = new Option("scer", "src_client_certificate", true, "Certificate of the application with read access to source AAD (overrides the 'src_client_secret' parameter)");
+
+	static final Option SRC_CLIENT_CERTIFICATE_PASSWORD = new Option("spwd", "src_client_certificate_password", true, "Password to open the certificate of the application with read access to source AAD (if the certificate informed in 'src_client_certificate' is in PFX/PKCS12 format)");
+
 	static final Option DST_TENANT_ID = new Option("dt", "dst_tenant_id", true, "Tenant-id of destination AAD");
 
 	static final Option DST_CLIENT_ID = new Option("dc", "dst_client_id", true, "Client-id of application with write access to destination AAD");
 
 	static final Option DST_CLIENT_SECRET = new Option("ds", "dst_client_secret", true, "Client-secret of application with write access to destination AAD");
-	
+
+	static final Option DST_CLIENT_CERTIFICATE = new Option("dcer", "dst_client_certificate", true, "Certificate of the application with write access to destination AAD (overrides the 'dst_client_secret' parameter)");
+
+	static final Option DST_CLIENT_CERTIFICATE_PASSWORD = new Option("dpwd", "dst_client_certificate_password", true, "Password to open the certificate of the application with write access to destination AAD (if the certificate informed in 'dst_client_certificate' is in PFX/PKCS12 format)");
+
 	static final Option CREATE_MISSING_GROUPS = new Option("cmg", "create_missing_groups", false, "Optional parameter. If informed, will automatically create at destination any missing groups. If not informed, will only report their absence.");
 
 	static final Option ALLOW_EMPTY_GROUPS = new Option("aeg", "allow_empty_groups", false,

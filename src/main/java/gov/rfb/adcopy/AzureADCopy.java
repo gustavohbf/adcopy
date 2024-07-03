@@ -21,6 +21,11 @@ package gov.rfb.adcopy;
 
 import static gov.rfb.adcopy.Settings.*;
 
+import java.io.BufferedInputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.util.Arrays;
 import java.util.Collections;
@@ -50,6 +55,7 @@ import org.apache.commons.cli.ParseException;
 import org.apache.commons.cli.PosixParser;
 
 import com.azure.core.credential.TokenCredential;
+import com.azure.identity.ClientCertificateCredentialBuilder;
 import com.azure.identity.ClientSecretCredentialBuilder;
 import com.microsoft.graph.authentication.TokenCredentialAuthProvider;
 import com.microsoft.graph.core.ClientException;
@@ -131,9 +137,22 @@ public class AzureADCopy implements Runnable
 	private String sourceClientId;
 	
 	/**
-	 * The client-secret of the registered application at the source AAD
+	 * The client-secret of the registered application at the source AAD.
+	 * This parameter may be replaced by the 'sourceCertificateFilename' parameter if you intend to use a certificate.
 	 */
 	private char[] sourceSecret;
+	
+	/**
+	 * The PFX (PKCS12) or PEM format (including private key) of the certificate to use for authentication at the source AAD.
+	 * This parameter overrides the 'sourceSecret' parameter.
+	 */
+	private String sourceCertificateFilename;
+	
+	/**
+	 * If you have informed the 'sourceCertificateFilename' parameter with the location of a PFX file, inform here the corresponding
+	 * password to open this file.
+	 */
+	private String sourceCertificatePassword;
 	
 	/**
 	 * The tenant-id of the destination AAD
@@ -146,9 +165,22 @@ public class AzureADCopy implements Runnable
 	private String destinationClientId;
 	
 	/**
-	 * The client-secret of the registered application at the destination AAD
+	 * The client-secret of the registered application at the destination AAD.
+	 * This parameter may be replaced by the 'destinationCertificateFilename' parameter if you intend to use a certificate.
 	 */
 	private char[] destinationSecret;
+	
+	/**
+	 * The PFX (PKCS12) or PEM format (including private key) of the certificate to use for authentication at the destination AAD.
+	 * This parameter overrides the 'destinationSecret' parameter.
+	 */
+	private String destinationCertificateFilename;
+	
+	/**
+	 * If you have informed the 'destinationCertificateFilename' parameter with the location of a PFX file, inform here the corresponding
+	 * password to open this file.
+	 */
+	private String destinationCertificatePassword;
 	
 	/**
 	 * The prefix to be used for searching group names. Multiple prefixes may be informed separated by commas.
@@ -237,11 +269,25 @@ public class AzureADCopy implements Runnable
     	
     	procedure.setSourceTenantId(getRequiredParameter(SRC_TENANT_ID, cmd));
     	procedure.setSourceClientId(getRequiredParameter(SRC_CLIENT_ID, cmd));
-    	procedure.setSourceSecret(getRequiredParameter(SRC_CLIENT_SECRET, cmd).toCharArray());
+    	
+    	if (cmd.hasOption(SRC_CLIENT_CERTIFICATE.getOpt())) {
+    		procedure.setSourceCertificateFilename(getRequiredParameter(SRC_CLIENT_CERTIFICATE, cmd));
+    		procedure.setSourceCertificatePassword(getParameter(SRC_CLIENT_CERTIFICATE_PASSWORD, cmd).orElse(null));
+    	}
+    	else {
+    		procedure.setSourceSecret(getRequiredParameter(SRC_CLIENT_SECRET, cmd).toCharArray());
+    	}
 
     	procedure.setDestinationTenantId(getRequiredParameter(DST_TENANT_ID, cmd));
     	procedure.setDestinationClientId(getRequiredParameter(DST_CLIENT_ID, cmd));
-    	procedure.setDestinationSecret(getRequiredParameter(DST_CLIENT_SECRET, cmd).toCharArray());
+
+    	if (cmd.hasOption(DST_CLIENT_CERTIFICATE.getOpt())) {
+    		procedure.setDestinationCertificateFilename(getRequiredParameter(DST_CLIENT_CERTIFICATE, cmd));    		
+    		procedure.setDestinationCertificatePassword(getParameter(DST_CLIENT_CERTIFICATE_PASSWORD, cmd).orElse(null));
+    	}
+    	else {
+    		procedure.setDestinationSecret(getRequiredParameter(DST_CLIENT_SECRET, cmd).toCharArray());
+    	}
     	
     	procedure.setCreateMissingGroups(cmd.hasOption(CREATE_MISSING_GROUPS.getOpt()));
     	procedure.setAllowEmptyGroups(cmd.hasOption(ALLOW_EMPTY_GROUPS.getOpt()));
@@ -336,13 +382,41 @@ public class AzureADCopy implements Runnable
 	}
 	
 	/**
-	 * Given the application credentials, returns the client to be used with the MSGraph API
+	 * Given the application credentials provided as a certificate file (PFX or PEM), returns the client to be used with the MSGraph API
+	 */
+	public static GraphServiceClient<Request> getGraphClientWithCertificateFile(String tenantId, String clientId, String certificateFilename, String certificatePassword) {
+		
+		ClientCertificateCredentialBuilder credentialBuilder = new ClientCertificateCredentialBuilder()
+		     .tenantId(tenantId)
+		     .clientId(clientId);
+		
+		if (isPEMFile(certificateFilename)) {
+			credentialBuilder.pemCertificate(certificateFilename);
+		}
+		else {
+			credentialBuilder.pfxCertificate(certificateFilename, certificatePassword);
+		}
+		
+		TokenCredential credential = credentialBuilder.build();
+		return getGraphClient(credential);
+	}	
+
+	/**
+	 * Given the application credentials provided as secret sequence of characters, returns the client to be used with the MSGraph API
 	 */
 	public static GraphServiceClient<Request> getGraphClient(String tenantId, String clientId, char[] clientSecret) {
+		
 		TokenCredential credential = new ClientSecretCredentialBuilder()
 				.clientId(clientId)
 				.tenantId(tenantId)
 				.clientSecret(new String(clientSecret)).build();
+		return getGraphClient(credential);
+	}
+	
+	/**
+	 * Given the application credentials, returns the client to be used with the MSGraph API
+	 */
+	public static GraphServiceClient<Request> getGraphClient(final TokenCredential credential) {
 
 		TokenCredentialAuthProvider tokenCredentialAuthProvider = new TokenCredentialAuthProvider(credential);
 
@@ -525,17 +599,51 @@ public class AzureADCopy implements Runnable
 	}
 
 	/**
-	 * The client-secret of the registered application at the source AAD
+	 * The client-secret of the registered application at the source AAD.
+	 * This parameter may be replaced by the 'sourceCertificateFilename' parameter if you intend to use a certificate.
 	 */
 	public char[] getSourceSecret() {
 		return sourceSecret;
 	}
 
 	/**
-	 * The client-secret of the registered application at the source AAD
+	 * The client-secret of the registered application at the source AAD.
+	 * This parameter may be replaced by the 'sourceCertificateFilename' parameter if you intend to use a certificate.
 	 */
 	public void setSourceSecret(char[] sourceSecret) {
 		this.sourceSecret = sourceSecret;
+	}
+
+	/**
+	 * The PFX (PKCS12) or PEM format (including private key) of the certificate to use for authentication at the source AAD.
+	 * This parameter overrides the 'sourceSecret' parameter.
+	 */
+	public String getSourceCertificateFilename() {
+		return sourceCertificateFilename;
+	}
+
+	/**
+	 * The PFX (PKCS12) or PEM format (including private key) of the certificate to use for authentication at the source AAD.
+	 * This parameter overrides the 'sourceSecret' parameter.
+	 */
+	public void setSourceCertificateFilename(String sourceCertificateFilename) {
+		this.sourceCertificateFilename = sourceCertificateFilename;
+	}
+
+	/**
+	 * If you have informed the 'sourceCertificateFilename' parameter with the location of a PFX file, inform here the corresponding
+	 * password to open this file.
+	 */
+	public String getSourceCertificatePassword() {
+		return sourceCertificatePassword;
+	}
+
+	/**
+	 * If you have informed the 'sourceCertificateFilename' parameter with the location of a PFX file, inform here the corresponding
+	 * password to open this file.
+	 */
+	public void setSourceCertificatePassword(String sourceCertificatePassword) {
+		this.sourceCertificatePassword = sourceCertificatePassword;
 	}
 
 	/**
@@ -567,17 +675,51 @@ public class AzureADCopy implements Runnable
 	}
 
 	/**
-	 * The client-secret of the registered application at the destination AAD
+	 * The client-secret of the registered application at the destination AAD.
+	 * This parameter may be replaced by the 'destinationCertificateFilename' parameter if you intend to use a certificate.
 	 */
 	public char[] getDestinationSecret() {
 		return destinationSecret;
 	}
 
 	/**
-	 * The client-secret of the registered application at the destination AAD
+	 * The client-secret of the registered application at the destination AAD.
+	 * This parameter may be replaced by the 'destinationCertificateFilename' parameter if you intend to use a certificate.
 	 */
 	public void setDestinationSecret(char[] destinationSecret) {
 		this.destinationSecret = destinationSecret;
+	}
+
+	/**
+	 * The PFX (PKCS12) or PEM format (including private key) of the certificate to use for authentication at the destination AAD.
+	 * This parameter overrides the 'destinationSecret' parameter.
+	 */
+	public String getDestinationCertificateFilename() {
+		return destinationCertificateFilename;
+	}
+
+	/**
+	 * The PFX (PKCS12) or PEM format (including private key) of the certificate to use for authentication at the destination AAD.
+	 * This parameter overrides the 'destinationSecret' parameter.
+	 */
+	public void setDestinationCertificateFilename(String destinationCertificateFilename) {
+		this.destinationCertificateFilename = destinationCertificateFilename;
+	}
+
+	/**
+	 * If you have informed the 'destinationCertificateFilename' parameter with the location of a PFX file, inform here the corresponding
+	 * password to open this file.
+	 */
+	public String getDestinationCertificatePassword() {
+		return destinationCertificatePassword;
+	}
+
+	/**
+	 * If you have informed the 'destinationCertificateFilename' parameter with the location of a PFX file, inform here the corresponding
+	 * password to open this file.
+	 */
+	public void setDestinationCertificatePassword(String destinationCertificatePassword) {
+		this.destinationCertificatePassword = destinationCertificatePassword;
 	}
 
 	/**
@@ -727,15 +869,21 @@ public class AzureADCopy implements Runnable
 	/**
 	 * Returns the object to be used as a client of the source AAD, given the provided credentials
 	 */
-	public GraphServiceClient<Request> getSourceGraphClient() {
-		return getGraphClient(sourceTenantId, sourceClientId, sourceSecret);
+	public GraphServiceClient<Request> getSourceGraphClient() {		
+		if (sourceCertificateFilename!=null)
+			return getGraphClientWithCertificateFile(sourceTenantId, sourceClientId, sourceCertificateFilename, sourceCertificatePassword);
+		else
+			return getGraphClient(sourceTenantId, sourceClientId, sourceSecret);
 	}
 	
 	/**
 	 * Returns the object to be used as a client of the destination AAD, given the provided credentials
 	 */
 	public GraphServiceClient<Request> getDestinationGraphClient() {
-		return getGraphClient(destinationTenantId, destinationClientId, destinationSecret);
+		if (destinationCertificateFilename!=null)
+			return getGraphClientWithCertificateFile(destinationTenantId, destinationClientId, destinationCertificateFilename, destinationCertificatePassword);
+		else
+			return getGraphClient(destinationTenantId, destinationClientId, destinationSecret);
 	}
 	
 	/**
@@ -1153,5 +1301,25 @@ public class AzureADCopy implements Runnable
 			summary.append("Count of users members not removed due to errors: ").append(getCountErrorsRemovingMembers()).append("\n");
 		}
 		return summary.toString();
+	}
+	
+	/**
+	 * Check if a file presumably contains PEM encoded credentials (such as certificate or private key)
+	 */
+	public static final boolean isPEMFile(String filename) {
+		if (filename==null || filename.trim().length()==0)
+			return false;
+		File file = new File(filename);
+		if (!file.isFile())
+			return false;
+		byte[] buffer = new byte[1024];
+		try (InputStream input = new BufferedInputStream(new FileInputStream(file), buffer.length)) {
+			int bytesRead = input.read(buffer);
+			String headerContents = new String(buffer, 0, bytesRead);
+			return headerContents.contains("-----BEGIN CERTIFICATE-----") || headerContents.contains("-----BEGIN PRIVATE KEY-----");
+		}
+		catch (IOException ex) {
+			return false;
+		}
 	}
 }

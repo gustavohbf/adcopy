@@ -36,6 +36,11 @@ For replicating the membership information for all groups defined in source AAD 
 mvn exec:java -Dexec.mainClass=gov.rfb.adcopy.AzureADCopy -Dexec.args="--src_tenant_id {...} --src_client_id {...} --src_client_secret {...} --dst_tenant_id {...} --dst_client_id {...} --dst_client_secret {...} --group_prefix SYSTEM. --threads 10"
 ```
 
+The same as above, but using a certificate file (either in PEM or PFX format) for authentication (the files must also include the private key).
+```
+mvn exec:java -Dexec.mainClass=gov.rfb.adcopy.AzureADCopy -Dexec.args="--src_tenant_id {...} --src_client_id {...} --src_client_certificate {...} --dst_tenant_id {...} --dst_client_id {...} --dst_client_certificate {...} --group_prefix SYSTEM. --threads 10"
+```
+
 For replicating the membership information for all groups defined in source AAD for which the group name starts with either the prefix 'SYSTEM.' or the prefix 'CLOUD.', skipping the missing groups at destination, with 10 concurrent threads, you may run something like this:
 ```
 mvn exec:java -Dexec.mainClass=gov.rfb.adcopy.AzureADCopy -Dexec.args="--src_tenant_id {...} --src_client_id {...} --src_client_secret {...} --dst_tenant_id {...} --dst_client_id {...} --dst_client_secret {...} --group_prefix SYSTEM.,CLOUD. --threads 10"
